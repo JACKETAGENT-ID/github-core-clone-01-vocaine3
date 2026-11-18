@@ -552,7 +552,7 @@ function resolveField(ctx: Ctx, obj: GqlObj, field: Extract<SelNode, { kind: 'fi
       if (name === 'state') return pr.state.toUpperCase();
       if (name === 'headRefName') return pr.headRef;
       if (name === 'baseRefName') return pr.baseRef;
-      if (name === 'mergeable') return ctx.store.prMergeable(obj.repo, pr);
+      if (name === 'mergeable') return ctx.store.prMergeable(obj.repo, pr) ? 'MERGEABLE' : 'CONFLICTING';
       if (name === 'merged') return pr.merged;
       if (name === 'url') return `https://example.invalid/${obj.repo.owner}/${obj.repo.name}/pull/${pr.number}`;
       if (name === 'createdAt' || name === 'updatedAt') return pr.createdAt;

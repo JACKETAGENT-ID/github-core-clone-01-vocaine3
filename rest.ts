@@ -303,15 +303,27 @@ async function handleContents(ctx: Ctx, repo: Repo, tail: string[], method: stri
     const b = body as Record<string, unknown>;
     const bodyBranch = typeof b.branch === 'string' ? b.branch : branch;
     const tip = repo.refs.get(`refs/heads/${bodyBranch}`);
-    if (!tip) return fail(res, 404, 'Branch not found'), true;
-    const commitInfo = parseCommit(repo.objects.get(tip)!.data);
-    const current = store.lookupPath(repo, commitInfo.tree, segments);
     const message = typeof b.message === 'string' ? b.message : `${method === 'PUT' ? 'Update' : 'Delete'} ${filePath}`;
 
     if (method === 'PUT') {
       const contentB64 = typeof b.content === 'string' ? b.content : '';
       if (contentB64 === '') return fail(res, 400, 'content is required'), true;
       const content = Buffer.from(contentB64.replace(/[\r\n\t ]+/g, ''), 'base64');
+      // First commit on an empty repo: no parent, the branch is created here.
+      if (!tip) {
+        if (repo.refs.size > 0) return fail(res, 404, 'Branch not found'), true;
+        const blobOid = storeObject(repo, 'blob', content);
+        const newTree = store.updateTree(repo, null, segments, blobOid);
+        const newCommit = buildCommit(newTree, [], message);
+        const commitOid = storeObject(repo, 'commit', newCommit);
+        repo.refs.set(`refs/heads/${bodyBranch}`, commitOid);
+        return ok(res, 201, {
+          content: { sha: blobOid, encoding: 'base64', name: segments[segments.length - 1], path: filePath },
+          commit: { sha: commitOid },
+        }), true;
+      }
+      const commitInfo = parseCommit(repo.objects.get(tip)!.data);
+      const current = store.lookupPath(repo, commitInfo.tree, segments);
       if (current && typeof b.sha === 'string' && b.sha !== current.oid) return fail(res, 409, 'sha does not match'), true;
       if (current && b.sha === undefined) return fail(res, 422, 'sha is required to update a file'), true;
       const blobOid = storeObject(repo, 'blob', content);
@@ -326,6 +338,9 @@ async function handleContents(ctx: Ctx, repo: Repo, tail: string[], method: stri
     }
 
     // DELETE
+    if (!tip) return fail(res, 404, 'Branch not found'), true;
+    const commitInfo = parseCommit(repo.objects.get(tip)!.data);
+    const current = store.lookupPath(repo, commitInfo.tree, segments);
     if (!current) return fail(res, 404, 'Not Found'), true;
     if (typeof b.sha === 'string' && b.sha !== current.oid) return fail(res, 409, 'sha does not match'), true;
     const newTree = store.updateTree(repo, commitInfo.tree, segments, null);

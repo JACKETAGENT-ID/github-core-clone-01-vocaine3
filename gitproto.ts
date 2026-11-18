@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { deflateSync, inflateSync } from 'node:zlib';
 import type { GitObj, ObjType, Repo } from './store.ts';
-import { collectCommits, collectReachable, hashObject, parseCommit, parseTree, storeObject } from './store.ts';
+import { hashObject, isAncestor, parseCommit, parseTree, storeObject } from './store.ts';
 
 export const AGENT = 'forge-v3/1.0.0';
 
@@ -240,6 +240,43 @@ export interface FetchPlan {
   nak: boolean;
 }
 
+/**
+ * Objects a fetch must send for the wanted commits: each wanted commit plus its
+ * full tree closure — but NOT the parents of wanted commits. (Depth limits which
+ * commits are wanted; following parents here would leak history past the depth.)
+ */
+function collectWantOids(objects: Map<string, GitObj>, wantCommits: string[]): Set<string> {
+  const out = new Set<string>();
+  const seen = new Set<string>();
+  const stack = [...wantCommits];
+  while (stack.length > 0) {
+    const oid = stack.pop()!;
+    if (seen.has(oid)) continue;
+    seen.add(oid);
+    const obj = objects.get(oid);
+    if (!obj) continue;
+    out.add(oid);
+    if (obj.type === 'commit') {
+      const treeStack = [parseCommit(obj.data).tree];
+      while (treeStack.length > 0) {
+        const t = treeStack.pop()!;
+        if (out.has(t)) continue;
+        const tobj = objects.get(t);
+        if (!tobj || tobj.type !== 'tree') continue;
+        out.add(t);
+        for (const e of parseTree(tobj.data)) {
+          if (e.isDir) treeStack.push(e.oid);
+          else out.add(e.oid);
+        }
+      }
+    } else if (obj.type === 'tag') {
+      const m = obj.data.toString('utf8').match(/^object ([0-9a-f]{40})\n/);
+      if (m) stack.push(m[1]);
+    }
+  }
+  return out;
+}
+
 /** Closure of haves, stopping descent at the client's shallow commits. */
 function collectHeld(objects: Map<string, GitObj>, haves: string[], shallow: Set<string>): Set<string> {
   const held = new Set<string>();
@@ -294,7 +331,7 @@ export function computeFetch(
     for (const p of parseCommit(obj.data).parents) queue.push({ oid: p, gen: gen + 1 });
   }
 
-  const wantOids = collectReachable(objects, wantCommits);
+  const wantOids = collectWantOids(objects, wantCommits);
   const toSend: string[] = [];
   for (const oid of wantOids) if (!held.has(oid)) toSend.push(oid);
   toSend.sort();
@@ -553,11 +590,14 @@ export function handleReceivePack(repo: Repo, body: Buffer): PushResult {
   const packBytes = body.subarray(parsed.next);
   let unpackOk = true;
   let unpackErr = '';
-  try {
-    readPack(repo, packBytes);
-  } catch (e) {
-    unpackOk = false;
-    unpackErr = e instanceof Error ? e.message : 'unpack failed';
+  // A delete-only push carries no pack at all (git sends none there either).
+  if (packBytes.length > 0) {
+    try {
+      readPack(repo, packBytes);
+    } catch (e) {
+      unpackOk = false;
+      unpackErr = e instanceof Error ? e.message : 'unpack failed';
+    }
   }
 
   const ZERO = '0000000000000000000000000000000000000000';
@@ -580,7 +620,7 @@ export function handleReceivePack(repo: Repo, body: Buffer): PushResult {
         continue;
       }
       const tip = repo.objects.get(c.newOid);
-      if (!tip || tip.type !== 'commit') {
+      if (!tip) {
         report.push(`ng ${c.ref} object not found`);
         continue;
       }
@@ -601,9 +641,10 @@ export function handleReceivePack(repo: Repo, body: Buffer): PushResult {
         report.push(`ok ${c.ref}`);
         continue;
       }
-      // Fast-forward check: new tip must descend from old tip.
-      const ancestors = collectCommits(repo.objects, c.newOid);
-      if (!ancestors.has(c.oldOid)) {
+      // Fast-forward check for commits: the new tip must descend from the old tip
+      // (isAncestor stops as soon as the old tip is found — no full-history walk).
+      // Non-commit targets (annotated tags) have no ancestry: old-match is enough.
+      if (tip.type === 'commit' && !isAncestor(repo.objects, c.oldOid, c.newOid)) {
         report.push(`ng ${c.ref} non-fast-forward`);
         continue;
       }
