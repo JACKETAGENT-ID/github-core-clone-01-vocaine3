@@ -305,17 +305,27 @@ export function computeFetch(
   const shallowSet = new Set(clientShallow);
   const held = collectHeld(objects, haves, shallowSet);
 
-  // Walk wants by generation (depth-limited).
+  // Walk wants by generation (depth-limited). Tag wants resolve to their target
+  // commit at the same generation, and the tag object itself is always sent.
   const wantCommits: string[] = [];
+  const extraOids = new Set<string>();
   const boundary = new Set<string>();
   const seen = new Set<string>();
   const queue: Array<{ oid: string; gen: number }> = wants.map((oid) => ({ oid, gen: 0 }));
-  while (queue.length > 0) {
-    const { oid, gen } = queue.shift()!;
+  let qi = 0;
+  while (qi < queue.length) {
+    const { oid, gen } = queue[qi++];
     if (seen.has(oid)) continue;
     seen.add(oid);
     const obj = objects.get(oid);
-    if (!obj || obj.type !== 'commit') continue;
+    if (!obj) continue;
+    if (obj.type === 'tag') {
+      extraOids.add(oid);
+      const m = obj.data.toString('utf8').match(/^object ([0-9a-f]{40})\n/);
+      if (m) queue.push({ oid: m[1], gen });
+      continue;
+    }
+    if (obj.type !== 'commit') continue;
     wantCommits.push(oid);
     if (depth !== null && gen === depth - 1) boundary.add(oid);
     if (depth !== null && gen >= depth - 1) continue;
@@ -323,14 +333,20 @@ export function computeFetch(
   }
 
   const wantOids = collectWantOids(objects, wantCommits);
+  for (const oid of extraOids) wantOids.add(oid);
   const toSend: string[] = [];
   for (const oid of wantOids) if (!held.has(oid)) toSend.push(oid);
   toSend.sort();
 
-  // Shallow bookkeeping.
+  // Shallow bookkeeping (only needed when the client has shallow commits).
   const after = new Set([...held, ...toSend]);
   const shallowOut = new Set<string>(boundary);
   const unshallowOut = new Set<string>();
+  if (clientShallow.length === 0) {
+    const knownHaves = haves.filter((h) => objects.has(h));
+    const nak = haves.length === 0 || knownHaves.length !== haves.length;
+    return { toSend, shallowOut: [...shallowOut].sort(), unshallowOut: [], ackOids: nak ? [] : knownHaves, nak };
+  }
   const wantAncestors = collectCommits(objects, wants[0] ?? '');
   for (const w of wants.slice(1)) for (const c of collectCommits(objects, w)) wantAncestors.add(c);
   for (const s of clientShallow) {
