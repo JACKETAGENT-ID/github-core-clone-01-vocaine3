@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { deflateSync, inflateSync } from 'node:zlib';
 import type { GitObj, ObjType, Repo } from './store.ts';
-import { hashObject, isAncestor, parseCommit, parseTree, storeObject } from './store.ts';
+import { collectCommits, hashObject, isAncestor, parseCommit, parseTree, storeObject } from './store.ts';
 
 export const AGENT = 'forge-v3/1.0.0';
 
@@ -188,15 +188,16 @@ export function readPack(repo: Repo, buf: Buffer): string[] {
         }
       }
       if (!base) throw new Error('delta base not found');
-      const delta = inflateSync(buf.subarray(i));
-      i += deflateStreamLength(buf, i);
-      data = applyDelta(base.data, delta);
+      const inflated = inflateWithLength(buf, i);
+      i += inflated.length;
+      data = applyDelta(base.data, inflated.data);
       type = base.type;
       if (data.length !== size) throw new Error('delta target size mismatch');
     } else {
       type = typeCode === 1 ? 'commit' : typeCode === 2 ? 'tree' : typeCode === 3 ? 'blob' : 'tag';
-      data = inflateSync(buf.subarray(i));
-      i += deflateStreamLength(buf, i);
+      const inflated = inflateWithLength(buf, i);
+      i += inflated.length;
+      data = inflated.data;
       if (data.length !== size) throw new Error('object size mismatch');
     }
     const oid = hashObject(type, data);
@@ -208,24 +209,14 @@ export function readPack(repo: Repo, buf: Buffer): string[] {
 }
 
 /**
- * Length of the zlib deflate stream starting at `off`.
- * inflateSync ignores trailing bytes and throws on truncation, so success is
- * monotone in slice length and a binary search finds the exact stream end.
+ * Inflate the deflate stream starting at `off` and report how many input bytes
+ * it consumed. `inflateSync(..., { info: true })` returns the engine, whose
+ * `bytesWritten` is exactly the stream length (trailing bytes are ignored, so
+ * the next object starts at off + length). One inflate per object.
  */
-function deflateStreamLength(buf: Buffer, off: number): number {
-  inflateSync(buf.subarray(off)); // throws if the stream is corrupt
-  let lo = 1;
-  let hi = buf.length - off;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    try {
-      inflateSync(buf.subarray(off, off + mid));
-      hi = mid;
-    } catch {
-      lo = mid + 1;
-    }
-  }
-  return lo;
+function inflateWithLength(buf: Buffer, off: number): { data: Buffer; length: number } {
+  const r = inflateSync(buf.subarray(off), { info: true }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+  return { data: r.buffer, length: r.engine.bytesWritten };
 }
 
 // ---------------------------------------------------------------------------

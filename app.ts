@@ -15,7 +15,7 @@ import {
   handleUploadPackV0,
   handleUploadPackV2,
 } from './gitproto.ts';
-import { readBody, sendBuffer, sendJson } from './httputil.ts';
+import { nextRequestId, readBody, sendBuffer, sendJson } from './httputil.ts';
 
 async function handleGit(store: Store, req: IncomingMessage, res: ServerResponse, pathname: string, query: URLSearchParams): Promise<boolean> {
   const segs = pathname.split('/').filter((s) => s.length > 0);
@@ -97,15 +97,15 @@ export function createApp() {
         const method = req.method ?? 'GET';
 
         if (pathname === '/healthz' && method === 'GET') {
-          sendJson(res, 200, { ok: true });
+          sendJson(res, 200, { ok: true }, { 'X-GitHub-Request-Id': nextRequestId() });
           return;
         }
         if ((pathname === '/meta' || pathname === '/api/v3/meta') && method === 'GET') {
-          sendJson(res, 200, { installed_version: '1.0.0-forge-v3' });
+          sendJson(res, 200, { installed_version: '1.0.0-forge-v3' }, { 'X-GitHub-Request-Id': nextRequestId() });
           return;
         }
         if ((pathname === '/' || pathname === '/api/v3' || pathname === '/api/v3/') && method === 'GET') {
-          sendJson(res, 200, {}, { 'X-OAuth-Scopes': 'repo, read:org' });
+          sendJson(res, 200, {}, { 'X-OAuth-Scopes': 'repo, read:org', 'X-GitHub-Request-Id': nextRequestId() });
           return;
         }
         if (pathname === '/api/graphql' && method === 'POST') {
